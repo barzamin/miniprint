@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     peripheral.discover_services().await?;
 
     let characteristics = peripheral.characteristics();
-    // info!("  found charcteristics: {:#?}", characteristics);
+    // info!("  found characteristics: {:#?}", characteristics);
     let char_cmd_no_resp = characteristics
         .iter()
         .find(|c| c.uuid == v5g::CHAR_UUID_WRITE_NO_RESP)
@@ -112,7 +112,12 @@ async fn main() -> anyhow::Result<()> {
     let mut notify_stream = peripheral.notifications().await?;
     tokio::spawn(async move {
         while let Some(dat) = notify_stream.next().await {
-            info!("NOTIFY [{:?}]: {:?}", dat.uuid, dat.value);
+            info!(
+                "NOTIFY [{:?}]: {:?} => {:?}",
+                dat.uuid,
+                dat.value,
+                v5g::NotifyResponse::parse(&dat.value)
+            );
         }
     });
 
@@ -150,7 +155,8 @@ async fn main() -> anyhow::Result<()> {
         cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
         cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
         cmds.push(CmdPacket::lattice_end());
-        cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0]));
+
+        cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0])); // this triggers NOTIFY with the device state :)
 
         cmds
     };

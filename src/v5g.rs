@@ -1,3 +1,5 @@
+use std::fmt;
+
 use btleplug::api::bleuuid::uuid_from_u16;
 use uuid::Uuid;
 
@@ -133,33 +135,105 @@ impl CmdPacket {
     }
 }
 
-// pub fn printbuf() -> Vec<CmdPacket> {
-//     let mut cmds = vec![];
+#[derive(Debug)]
+pub enum ParseError {
+    BadMagic,
+    BadTerminator,
+    Checksum,
+    UnknownType,
+    InvalidLength,
+    BadDirection(u8),
+}
 
-//     cmds.push(CmdPacket::quality(5));
-//     cmds.push(CmdPacket::lattice_start());
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadMagic => write!(f, "bad magic in packet header"),
+            Self::BadTerminator => write!(f, "packet should be terminated with 0xff"),
+            Self::Checksum => write!(f, "packet checksum doesn't match"),
+            Self::UnknownType => write!(f, "unknown packet type"),
+            Self::InvalidLength => write!(f, "packet length asks us to overread"),
+            Self::BadDirection(dir) => write!(
+                f,
+                "expected packet direction 1 (NOTIFY), but instead got {}",
+                dir
+            ),
+        }
+    }
+}
 
-//     // routine eachLinePixToCmdB
-//     cmds.push(CmdPacket::energy(10000));
-//     cmds.push(CmdPacket::print_mode(PrintMode::Image));
-//     cmds.push(CmdPacket::print_speed(10));
+impl std::error::Error for ParseError {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        self.source()
+    }
+}
 
-//     for _ in 0..64 {
-//         cmds.push(CmdPacket::new(CommandId::BitmapData, vec![0xff; 48]));
-//     }
-//     // end eachLinePixToCmdB
+#[derive(Debug)]
+pub enum NotifyResponse {
+    DeviceState(Vec<u8>),
+}
 
-//     cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
-//     cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
-//     cmds.push(CmdPacket::lattice_end());
-//     cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0]));
+impl NotifyResponse {
+    pub fn parse(buf: &[u8]) -> Result<Self, ParseError> {
+        let mut i = 0usize;
 
-//     cmds
-// }
+        if buf[0] != 0x51 || buf[1] != 0x78 {
+            return Err(ParseError::BadMagic);
+        }
+        i += 2;
+
+        let id = buf[i];
+        i += 1;
+
+        let pktdir = buf[i];
+        i += 1;
+        if pktdir != 1 {
+            return Err(ParseError::BadDirection(pktdir));
+        }
+
+        // dlen: u16 = lo hi
+        let dlen = buf[i] as u16 | ((buf[i + 1] as u16) << 8);
+        i += 2;
+
+        // -2 for footer
+        if i + dlen as usize > buf.len() - 2 {
+            return Err(ParseError::InvalidLength);
+        }
+
+        let data = buf[i..i + dlen as usize].to_vec();
+
+        i += dlen as usize;
+        let promised_crc = buf[i];
+        let crc = crc8(&data);
+        if promised_crc != crc {
+            return Err(ParseError::Checksum);
+        }
+
+        i += 1;
+        if buf[i] != 0xff {
+            return Err(ParseError::BadTerminator);
+        }
+
+        match id {
+            0xa3u8 => Ok(NotifyResponse::DeviceState(data)),
+            _ => Err(ParseError::UnknownType),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_notify() {
+        let buf = vec![
+            0x51, 0x78, 0xa3, 0x01, 0x03, 0x00, 0x00, 0x01, 0x5f, 0x8f, 0xff,
+        ];
+
+        let pkt = NotifyResponse::parse(&buf).unwrap();
+        println!("{:#x?}", pkt);
+    }
 
     #[test]
     fn test_cmd_paper() {
