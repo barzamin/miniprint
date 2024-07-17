@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Context};
 use btleplug::{
@@ -12,11 +12,12 @@ use image::{
     io::Reader as ImageReader,
 };
 use log::{debug, info};
-use v5g::PrintMode;
+use printer::PrintDriver;
 
-use crate::v5g::{CmdPacket, CommandId};
+use crate::v5g::{CmdPacket, CommandId, PrintMode};
 
-mod v5g;
+pub mod printer;
+pub mod v5g;
 
 async fn locate_device(central: &Adapter, search_name: &str) -> anyhow::Result<Option<Peripheral>> {
     let mut events = central.events().await?;
@@ -60,7 +61,11 @@ async fn locate_device(central: &Adapter, search_name: &str) -> anyhow::Result<O
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
+    #[arg(short, long, default_value = "MX10")]
     search_name: String,
+
+    #[arg(required = true)]
+    images: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -121,62 +126,18 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let img = ImageReader::open("epicbwbayer.png")?.decode()?;
-    let img = img.resize(v5g::HORIZ_RESOLUTION, u32::MAX, FilterType::Gaussian);
-    let img = img.grayscale().to_luma8();
+    for imgpath in args.images {
+        let img = ImageReader::open(imgpath)?.decode()?;
+        let img = img.resize(v5g::HORIZ_RESOLUTION, u32::MAX, FilterType::Gaussian);
+        let img = img.grayscale().to_luma8();
 
-    let printbuf = {
-        let mut cmds = vec![];
+        let printer = v5g::Driver {
+            peripheral: &peripheral,
+            char_cmd_no_resp,
+            char_notify,
+        };
 
-        cmds.push(CmdPacket::quality(5));
-        cmds.push(CmdPacket::lattice_start());
-
-        // routine eachLinePixToCmdB
-        cmds.push(CmdPacket::energy(10000));
-        cmds.push(CmdPacket::print_mode(PrintMode::Image));
-        cmds.push(CmdPacket::print_speed(10));
-
-        // for _ in 0..64 {
-        //     cmds.push(CmdPacket::new(CommandId::BitmapData, vec![0xff; 48]));
-        // }
-
-        for j in 0..img.height() {
-            let mut row_buf = [0u8; v5g::HORIZ_RESOLUTION as usize / 8];
-            for i in 0..img.width() {
-                row_buf[(i as usize) / 8] >>= 1;
-                // 1 = burn this dot
-                row_buf[(i as usize) / 8] |= if img.get_pixel(i, j).0[0] < 127 { 0b10000000 } else { 0 };
-            }
-            cmds.push(CmdPacket::new(CommandId::BitmapData, row_buf.to_vec()));
-        }
-
-        // end eachLinePixToCmdB
-
-        cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
-        cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
-        cmds.push(CmdPacket::lattice_end());
-
-        cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0])); // this triggers NOTIFY with the device state :)
-
-        cmds
-    };
-
-    let mut cmdbuf = Vec::<u8>::new();
-    for pkt in printbuf.into_iter() {
-        cmdbuf.append(&mut pkt.to_vec()?);
-    }
-
-    for dat in cmdbuf.chunks(v5g::TX_SIZE) {
-        debug!("CMD {:?}", dat);
-        peripheral
-            .write(
-                &char_cmd_no_resp,
-                dat,
-                WriteType::WithoutResponse,
-            )
-            .await?;
-
-        tokio::time::sleep(Duration::from_secs_f32(0.01)).await;
+        printer.print(img, Default::default()).await?;
     }
 
     Ok(())

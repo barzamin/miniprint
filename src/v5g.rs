@@ -1,7 +1,10 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
-use btleplug::api::bleuuid::uuid_from_u16;
+use btleplug::api::{bleuuid::uuid_from_u16, Characteristic, Peripheral as _, WriteType};
+use log::debug;
 use uuid::Uuid;
+
+use crate::printer::PrintDriver;
 
 pub const CHAR_UUID_WRITE_NO_RESP: Uuid = uuid_from_u16(0xae01);
 pub const CHAR_UUID_NOTIFY: Uuid = uuid_from_u16(0xae02);
@@ -218,6 +221,97 @@ impl NotifyResponse {
             0xa3u8 => Ok(NotifyResponse::DeviceState(data)),
             _ => Err(ParseError::UnknownType),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrintSettings {
+    energy: u16,
+    print_mode: PrintMode,
+    print_speed: u8,
+    /// feed after? 0 - no feed
+    feeds_after: usize,
+    quality: u8,
+}
+
+impl Default for PrintSettings {
+    fn default() -> Self {
+        Self {
+            energy: 10_000,
+            print_mode: PrintMode::Image,
+            print_speed: 10,
+            feeds_after: 2,
+            quality: 5,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Driver<'a> {
+    pub peripheral: &'a btleplug::platform::Peripheral,
+    pub char_cmd_no_resp: &'a Characteristic,
+    pub char_notify: &'a Characteristic,
+}
+
+impl<'a> PrintDriver for Driver<'a> {
+    type DeviceSettings = PrintSettings;
+    type Error = anyhow::Error;
+
+    async fn print<I>(&self, img: I, settings: Self::DeviceSettings) -> Result<(), Self::Error>
+    where
+        I: image::GenericImageView<Pixel = image::Luma<u8>>,
+    {
+        let pkts = {
+            let mut cmds: Vec<CmdPacket> = vec![];
+
+            cmds.push(CmdPacket::quality(5));
+            cmds.push(CmdPacket::lattice_start());
+
+            // routine eachLinePixToCmdB
+            cmds.push(CmdPacket::energy(10000));
+            cmds.push(CmdPacket::print_mode(PrintMode::Image));
+            cmds.push(CmdPacket::print_speed(10));
+
+            for j in 0..img.height() {
+                let mut row_buf = [0u8; HORIZ_RESOLUTION as usize / 8];
+                for i in 0..img.width() {
+                    row_buf[(i as usize) / 8] >>= 1;
+                    // 1 = burn this dot
+                    row_buf[(i as usize) / 8] |= if img.get_pixel(i, j).0[0] < 127 {
+                        0b10000000
+                    } else {
+                        0
+                    };
+                }
+                cmds.push(CmdPacket::new(CommandId::BitmapData, row_buf.to_vec()));
+            }
+
+            // end eachLinePixToCmdB
+
+            cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
+            cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
+            cmds.push(CmdPacket::lattice_end());
+
+            cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0])); // this triggers NOTIFY with the device state :)
+
+            cmds
+        };
+
+        let mut buf = Vec::<u8>::new();
+        for pkt in pkts.into_iter() {
+            buf.append(&mut pkt.to_vec()?);
+        }
+
+        for dat in buf.chunks(TX_SIZE) {
+            debug!("CMD {:?}", dat);
+            self.peripheral
+                .write(self.char_cmd_no_resp, dat, WriteType::WithoutResponse)
+                .await?;
+
+            tokio::time::sleep(Duration::from_secs_f32(0.01)).await;
+        }
+
+        Ok(())
     }
 }
 
