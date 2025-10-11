@@ -254,23 +254,23 @@ pub struct Driver<'a> {
 }
 
 impl<'a> PrintDriver for Driver<'a> {
-    type DeviceSettings = PrintSettings;
+    type PrintSettings = PrintSettings;
     type Error = anyhow::Error;
 
-    async fn print<I>(&self, img: I, settings: Self::DeviceSettings) -> Result<(), Self::Error>
+    async fn print<I>(&self, img: I, settings: Self::PrintSettings) -> Result<(), Self::Error>
     where
         I: image::GenericImageView<Pixel = image::Luma<u8>>,
     {
         let pkts = {
             let mut cmds: Vec<CmdPacket> = vec![];
 
-            cmds.push(CmdPacket::quality(5));
+            cmds.push(CmdPacket::quality(settings.quality));
             cmds.push(CmdPacket::lattice_start());
 
             // routine eachLinePixToCmdB
-            cmds.push(CmdPacket::energy(10000));
-            cmds.push(CmdPacket::print_mode(PrintMode::Image));
-            cmds.push(CmdPacket::print_speed(10));
+            cmds.push(CmdPacket::energy(settings.energy));
+            cmds.push(CmdPacket::print_mode(settings.print_mode));
+            cmds.push(CmdPacket::print_speed(settings.print_speed));
 
             for j in 0..img.height() {
                 let mut row_buf = [0u8; HORIZ_RESOLUTION as usize / 8];
@@ -288,8 +288,9 @@ impl<'a> PrintDriver for Driver<'a> {
 
             // end eachLinePixToCmdB
 
-            cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
-            cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
+            for _ in 0..settings.feeds_after {
+                cmds.push(CmdPacket::new(CommandId::Paper, vec![0x30, 0x00]));
+            }
             cmds.push(CmdPacket::lattice_end());
 
             cmds.push(CmdPacket::new(CommandId::GetDeviceState, vec![0x0])); // this triggers NOTIFY with the device state :)

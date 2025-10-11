@@ -8,8 +8,7 @@ use btleplug::{
 use clap::Parser;
 use futures::stream::StreamExt;
 use image::{
-    imageops::FilterType::{self, Gaussian},
-    io::Reader as ImageReader,
+    imageops::FilterType::{self, Gaussian}, ImageReader,
 };
 use log::{debug, info};
 use printer::PrintDriver;
@@ -51,6 +50,9 @@ async fn locate_device(central: &Adapter, search_name: &str) -> anyhow::Result<O
             }
             CentralEvent::ServicesAdvertisement { id, services } => {
                 debug!("ServicesAdvertisement {:?}: {:?}", id, services)
+            }
+            CentralEvent::StateUpdate(central_state) => {
+                debug!("StateUpdate {:?}", central_state)
             }
         }
     }
